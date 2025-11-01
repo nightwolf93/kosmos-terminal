@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain } from 'electron'
 import path from 'node:path'
 import * as pty from 'node-pty';
 import os from 'os';
-import { LLMConnector } from 'agent';
+import { LLMConnector, PlannerService } from 'agent';
 
 // Determine the correct shell for the OS
 const shell = os.platform() === 'win32' ? 'powershell.exe' : 'bash';
@@ -67,6 +67,12 @@ function createWindow() {
   const llmConnector = new LLMConnector();
   ipcMain.handle('llm-explain-command', async (event, command) => {
     return await llmConnector.explainCommand(command);
+  });
+
+  // Handle LLM plan creation
+  const plannerService = new PlannerService();
+  ipcMain.handle('llm-create-plan', async (event, goal) => {
+    return await plannerService.createPlan(goal);
   });
 }
 
