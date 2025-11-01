@@ -2,7 +2,9 @@ import { app, BrowserWindow, ipcMain } from 'electron'
 import path from 'node:path'
 import * as pty from 'node-pty';
 import os from 'os';
-import { LLMConnector, PlannerService } from 'agent';
+import { LLMConnector, PlannerService, ToolRegistry, PolicyEngine } from 'agent';
+import { gitTool } from 'tools';
+import { Policy, Step, ToolContext } from 'types';
 
 // Determine the correct shell for the OS
 const shell = os.platform() === 'win32' ? 'powershell.exe' : 'bash';
@@ -44,7 +46,7 @@ function createWindow() {
     win.loadFile(path.join(process.env.DIST, 'index.html'))
   }
 
-  // Spawn pty process
+  // --- PTY Setup ---
   const ptyProcess = pty.spawn(shell, [], {
     name: 'xterm-color',
     cols: 80,
@@ -52,46 +54,88 @@ function createWindow() {
     cwd: process.env.HOME,
     env: process.env
   });
+  ptyProcess.on('data', (data) => win?.webContents.send('pty-data', data));
+  ipcMain.on('pty-write', (event, data) => ptyProcess.write(data));
 
-  // Relay data from pty to renderer
-  ptyProcess.on('data', function (data) {
-    win?.webContents.send('pty-data', data);
-  });
-
-  // Relay data from renderer to pty
-  ipcMain.on('pty-write', (event, data) => {
-    ptyProcess.write(data);
-  });
-
-  // Handle LLM command explanation
+  // --- Agent Setup ---
   const llmConnector = new LLMConnector();
-  ipcMain.handle('llm-explain-command', async (event, command) => {
-    return await llmConnector.explainCommand(command);
-  });
-
-  // Handle LLM plan creation
   const plannerService = new PlannerService();
-  ipcMain.handle('llm-create-plan', async (event, goal) => {
-    return await plannerService.createPlan(goal);
+  const toolRegistry = new ToolRegistry();
+  toolRegistry.register(gitTool);
+
+  const policy: Policy = {
+    mode: 'safe',
+    fsAllow: [process.cwd()], // Allow access to the current project directory
+    netAllow: [],
+    commandDeny: [],
+    maxFilesTouched: 10,
+    timeoutMs: 10000,
+  };
+  const policyEngine = new PolicyEngine(policy);
+
+  // --- IPC Handlers ---
+  ipcMain.handle('llm-explain-command', (event, command) => llmConnector.explainCommand(command));
+  ipcMain.handle('llm-create-plan', (event, goal) => plannerService.createPlan(goal));
+
+  ipcMain.handle('execute-step', async (event, step: Step) => {
+    if (step.cmd) {
+      ptyProcess.write(step.cmd + '\\r'); // Add carriage return to execute
+      return { result: `Executed command: ${step.cmd}` };
+    }
+
+    if (!step.tool) {
+      return { error: 'No tool or command specified for this step.' };
+    }
+
+    const [toolName, functionName] = step.tool.split('.');
+    if (!toolName || !functionName) {
+      return { error: `Invalid tool format. Expected 'toolName.functionName', but got '${step.tool}'.` };
+    }
+
+    const tool = toolRegistry.get(toolName);
+    if (!tool) {
+      return { error: `Tool "${toolName}" not found.` };
+    }
+
+    const cwd = process.cwd(); // In the future, this could be dynamic
+    if (!policyEngine.canExecute(tool, cwd)) {
+      return { error: `Execution of tool "${toolName}" is denied by the current policy.` };
+    }
+
+    const toolFunction = tool.functions[functionName];
+    if (!toolFunction) {
+      return { error: `Function "${functionName}" not found in tool "${toolName}".` };
+    }
+
+    const context: ToolContext = {
+      cwd: cwd,
+      env: process.env,
+      policy: policy,
+      logger: (log) => win?.webContents.send('log-message', log),
+    };
+
+    try {
+      const result = await toolFunction(step.args, context);
+      return { result };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      return { error: errorMessage };
+    }
   });
 }
 
-// Quit when all windows are closed, except on macOS. There, it's common
-// for applications and their menu bar to stay active until the user quits
-// explicitly with Cmd + Q.
+// --- App Lifecycle ---
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
     win = null
   }
-})
+});
 
 app.on('activate', () => {
-  // On OS X it's common to re-create a window in the app when the
-  // dock icon is clicked and there are no other windows open.
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow()
   }
-})
+});
 
-app.whenReady().then(createWindow)
+app.whenReady().then(createWindow);
