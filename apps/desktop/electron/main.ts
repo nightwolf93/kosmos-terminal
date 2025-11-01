@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain } from 'electron'
 import path from 'node:path'
 import * as pty from 'node-pty';
 import os from 'os';
+import { LLMConnector } from 'agent';
 
 // Determine the correct shell for the OS
 const shell = os.platform() === 'win32' ? 'powershell.exe' : 'bash';
@@ -60,6 +61,12 @@ function createWindow() {
   // Relay data from renderer to pty
   ipcMain.on('pty-write', (event, data) => {
     ptyProcess.write(data);
+  });
+
+  // Handle LLM command explanation
+  const llmConnector = new LLMConnector();
+  ipcMain.handle('llm-explain-command', async (event, command) => {
+    return await llmConnector.explainCommand(command);
   });
 }
 
